@@ -1,0 +1,16 @@
+lm_studio:
+  base_url: "http://localhost:1234"
+  api_token: null
+  llm_model: "qwen/qwen3.5-9b"
+  logic_model: "deepseek/deepseek-r1-0528-qwen3-8b"
+
+paths:
+  modules_dir: "modules"
+  data_dir: "data"
+  archive_dir: "archive/modules"
+
+system:
+  queue_poll_interval_ms: 100
+  task_timeout_seconds: 120
+  max_recovery_attempts: 3
+  max_total_steps: 24

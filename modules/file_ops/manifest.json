@@ -1,0 +1,87 @@
+{
+  "name": "file_ops",
+  "version": "1.2.0",
+  "description": "Универсальный интерфейс к файловой системе: разведка и действия.",
+  "entrypoint": "agent:execute",
+  "operations": [
+    {
+      "name": "well_known_dirs",
+      "description": "Список известных директорий (профиль, загрузки, Program Files и т.д.) с флагами exists/writable",
+      "input_schema": {},
+      "requires_approval": false
+    },
+    {
+      "name": "exists",
+      "description": "Проверить существование пути",
+      "input_schema": { "path": "string" },
+      "requires_approval": false
+    },
+    {
+      "name": "stat",
+      "description": "Метаданные пути: тип, размер, доступность записи",
+      "input_schema": { "path": "string" },
+      "requires_approval": false
+    },
+    {
+      "name": "list_dir",
+      "description": "Список содержимого директории",
+      "input_schema": { "path": "string" },
+      "requires_approval": false
+    },
+    {
+      "name": "glob",
+      "description": "Поиск файлов по маске внутри директории",
+      "input_schema": {
+        "root": "string",
+        "pattern": "string",
+        "limit": "number (optional, default 100)"
+      },
+      "requires_approval": false
+    },
+    {
+      "name": "mkdir",
+      "description": "Создать директорию",
+      "input_schema": { "path": "string" },
+      "requires_approval": true
+    },
+    {
+      "name": "write_file",
+      "description": "Создать или перезаписать файл любого расширения",
+      "input_schema": {
+        "path": "string",
+        "content": "string"
+      },
+      "requires_approval": true
+    },
+    {
+      "name": "read_file",
+      "description": "Прочитать текстовый файл",
+      "input_schema": { "path": "string" },
+      "requires_approval": false
+    },
+    {
+      "name": "delete",
+      "description": "Удалить файл или директорию",
+      "input_schema": { "path": "string" },
+      "requires_approval": true
+    },
+    {
+      "name": "copy",
+      "description": "Копировать файл или директорию",
+      "input_schema": {
+        "source": "string",
+        "destination": "string"
+      },
+      "requires_approval": true
+    },
+    {
+      "name": "move",
+      "description": "Переместить или переименовать",
+      "input_schema": {
+        "source": "string",
+        "destination": "string"
+      },
+      "requires_approval": true
+    }
+  ]
+}
