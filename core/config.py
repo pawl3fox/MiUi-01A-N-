@@ -53,6 +53,11 @@ class AppConfig(BaseModel):
     def queue_db_path(self) -> Path:
         return self.data_path / "queue.db"
 
+    @property
+    def context_db_path(self) -> Path:
+        """БД контекста для LLM."""
+        return self.data_path / "context.db"
+
 
 def load_config(config_path: Path | None = None) -> AppConfig:
     root_dir = Path.cwd()
