@@ -60,6 +60,7 @@ class OperatorApp:
             event_log=self.event_log,
             lm_client=self.lm_client,
             logic_model=self.config.lm_studio.logic_model,
+            llm_model=self.config.lm_studio.llm_model,
             results_queue=self._results_queue,
             task_timeout_seconds=self.config.system.task_timeout_seconds,
             max_recovery_attempts=self.config.system.max_recovery_attempts,
@@ -117,7 +118,7 @@ class OperatorApp:
                     {
                         "role": "user",
                         "content": (
-                            f"Отчёт о выполненной задаче.\n"
+                            f"Режим: response_to_report\n"
                             f"Запрос: {action_text}\n"
                             f"Статус: {run_result.status}\n"
                             f"{summary}"
@@ -125,7 +126,7 @@ class OperatorApp:
                     },
                 ],
                 temperature=0.3,
-                max_tokens=512,
+                max_tokens=256,
             )
             if reply.strip():
                 return reply
