@@ -13,6 +13,8 @@ class LogicAction(str, Enum):
     COMPLETE = "complete"
     EXECUTE_STEP = "execute_step"
     RESUME_PLAN = "resume_plan"
+    INQUIRY = "inquiry"
+    DELEGATE_TO_LLM = "delegate_to_llm"
 
 
 class LogicDecision(BaseModel):
@@ -20,6 +22,7 @@ class LogicDecision(BaseModel):
     action: LogicAction
     step: PlanStep | None = None
     note: str = ""
+    inquiry_text: str | None = None
 
 
 class StepExecution(BaseModel):
