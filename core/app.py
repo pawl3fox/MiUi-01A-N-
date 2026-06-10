@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from contracts.execution import TaskRunResult
-from core.classifier import Intent, IntentClassifier
 from core.config import AppConfig, load_config
+from core.context_store import ContextStore
 from core.event_log import EventLog
 from core.executor import TaskExecutor
+from core.llm_interface import LLMInterface
 from core.logic import LogicCore
 from core.lm_studio import LMStudioClient
 from core.message_bus import SQLiteMessageBus
@@ -17,15 +18,36 @@ from workers.runner import ModuleWorker
 
 
 class OperatorApp:
+    """Главное приложение системы Operator.
+
+    Архитектура:
+    - LLM (LLMInterface) — единая точка входа, управляется пользователем
+    - Logic (LogicCore) — обрабатывает запросы LLM через [LOGIC_REQUEST]
+    - Orchestrator — переключает модели по требованию
+    - ContextStore — хранит историю для контекста LLM
+    """
+
     def __init__(self, config: AppConfig | None = None) -> None:
         self.config = config or load_config()
         self.event_log = EventLog(self.config.events_db_path)
+        self.context_store = ContextStore(self.config.context_db_path)
         self.bus = SQLiteMessageBus(self.config.queue_db_path)
         self.lm_client = LMStudioClient(self.config.lm_studio)
         self.registry = ModuleRegistry(self.config.modules_path, self.event_log)
+
         self.orchestrator = ModelOrchestrator(
             self.config, self.lm_client, self.event_log
         )
+
+        # LLM интерфейс — единая точка входа
+        self.llm_interface = LLMInterface(
+            lm_client=self.lm_client,
+            llm_model=self.config.lm_studio.llm_model,
+            event_log=self.event_log,
+            context_store=self.context_store,
+        )
+
+        # Logic ядро — обработчик действий
         self.logic = LogicCore(
             lm_client=self.lm_client,
             logic_model=self.config.lm_studio.logic_model,
@@ -33,17 +55,16 @@ class OperatorApp:
             bus=self.bus,
             event_log=self.event_log,
         )
+
+        # Recovery advisor
         self.recovery = RecoveryAdvisor(
             lm_client=self.lm_client,
             logic_model=self.config.lm_studio.logic_model,
             registry=self.registry,
             event_log=self.event_log,
         )
-        self.classifier = IntentClassifier(
-            lm_client=self.lm_client,
-            llm_model=self.config.lm_studio.llm_model,
-            event_log=self.event_log,
-        )
+
+        # Worker для исполнения шагов
         self._results_queue: asyncio.Queue = asyncio.Queue()
         self.worker = ModuleWorker(
             registry=self.registry,
@@ -52,6 +73,8 @@ class OperatorApp:
             poll_interval_ms=self.config.system.queue_poll_interval_ms,
             results_queue=self._results_queue,
         )
+
+        # Executor для управления выполнением
         self.executor = TaskExecutor(
             logic=self.logic,
             recovery=self.recovery,
@@ -66,18 +89,23 @@ class OperatorApp:
             max_recovery_attempts=self.config.system.max_recovery_attempts,
             max_total_steps=self.config.system.max_total_steps,
         )
+
         self._worker_task: asyncio.Task[None] | None = None
+        self.event_log_instance = self.event_log
 
     async def startup(self) -> None:
+        """Инициализация приложения."""
         self.config.data_path.mkdir(parents=True, exist_ok=True)
         self.config.archive_path.mkdir(parents=True, exist_ok=True)
         await self.event_log.initialize()
+        await self.context_store.initialize()
         await self.bus.initialize()
         await self.registry.scan()
         await self.orchestrator.initialize()
         self._worker_task = asyncio.create_task(self.worker.start())
 
     async def shutdown(self) -> None:
+        """Выключение приложения."""
         self.worker.stop()
         if self._worker_task is not None:
             self._worker_task.cancel()
@@ -87,98 +115,97 @@ class OperatorApp:
                 pass
 
     async def handle_message(self, user_message: str, force_action: bool = False) -> str:
+        """Обработать сообщение пользователя через LLM.
+
+        Args:
+            user_message: Сообщение от пользователя
+            force_action: Если True, принудительно выполнить как действие
+
+        Returns:
+            Ответ пользователю
+        """
         if force_action:
-            return await self.execute_action(user_message)
+            return await self._execute_logic_request(user_message)
 
+        # LLM сама решает, нужна ли ей Logic
         await self.orchestrator.activate_llm()
-        intent = await self.classifier.classify(user_message)
-        if intent == Intent.ACTION:
-            return await self.execute_action(user_message)
-        return await self.chat(user_message)
+        llm_response = await self.llm_interface.process_user_message(user_message)
 
-    async def chat(self, user_message: str) -> str:
-        await self.orchestrator.activate_llm()
-        return await self.lm_client.chat_completion(
-            model=self.config.lm_studio.llm_model,
-            messages=[{"role": "user", "content": user_message}],
-            temperature=0.7,
+        # Сохранить в контекст
+        await self.context_store.store_event(
+            task_id=None,
+            channel="user",
+            message=user_message[:200],
         )
 
-    async def execute_action(self, action_text: str) -> str:
+        # Если LLM запросила выполнение действия
+        if llm_response.logic_request:
+            task_result = await self._execute_logic_request(
+                llm_response.logic_request.task_description
+            )
+
+            # Получить финальный ответ от LLM о результате
+            result_response = await self.llm_interface.format_task_result(
+                user_request=user_message,
+                task_status=task_result.status,
+                task_summary=self._format_task_result_brief(task_result),
+            )
+
+            await self.context_store.store_event(
+                task_id=task_result.task_id,
+                channel="task",
+                message=f"Результат: {task_result.status}",
+                payload={"status": task_result.status},
+            )
+
+            return result_response
+
+        # Иначе просто вернуть ответ от LLM
+        await self.context_store.store_event(
+            task_id=None,
+            channel="llm",
+            message="Chat response",
+        )
+        return llm_response.text
+
+    async def _execute_logic_request(self, task_description: str) -> TaskRunResult:
+        """Выполнить запрос Logic ядра.
+
+        Args:
+            task_description: Описание задачи
+
+        Returns:
+            Результат выполнения
+        """
         await self.orchestrator.activate_logic()
-        run_result = await self.executor.run(action_text)
-        summary = self._format_run_summary(run_result)
+        result = await self.executor.run(task_description)
 
-        fallback = self._format_fallback_response(action_text, run_result)
-        await self.orchestrator.activate_llm()
-        try:
-            reply = await self.lm_client.chat_completion(
-                model=self.config.lm_studio.llm_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Режим: response_to_report\n"
-                            f"Запрос: {action_text}\n"
-                            f"Статус: {run_result.status}\n"
-                            f"{summary}"
-                        ),
-                    },
-                ],
-                temperature=0.3,
-                max_tokens=256,
-            )
-            if reply.strip():
-                return reply
-        except RuntimeError as exc:
-            await self.event_log.log(
-                channel="error",
-                source="app",
-                message=str(exc),
-                task_id=run_result.task_id,
-            )
-        return fallback
+        await self.context_store.store_event(
+            task_id=result.task_id,
+            channel="task",
+            message=f"Task {result.status}: {task_description[:100]}",
+            payload={
+                "status": result.status,
+                "goal": task_description,
+                "steps_count": len(result.steps),
+            },
+        )
 
-    def _format_run_summary(self, run_result: TaskRunResult) -> str:
-        lines: list[str] = []
-        if run_result.final_analysis:
-            lines.append(f"Анализ Logic: {run_result.final_analysis}")
-        for step in run_result.steps:
-            label = f"[{step.source}] {step.module}.{step.operation}"
-            if step.success:
-                lines.append(f"Шаг {step.step_id} {label}: успех — {step.result}")
-            else:
-                lines.append(f"Шаг {step.step_id} {label}: ошибка — {step.error}")
-        if run_result.final_error and run_result.status != "completed":
-            lines.append(f"Итог: {run_result.final_error}")
-        return "\n".join(lines)
+        return result
 
-    def _format_fallback_response(
-        self,
-        action_text: str,
-        run_result: TaskRunResult,
-    ) -> str:
+    def _format_task_result_brief(self, run_result: TaskRunResult) -> str:
+        """Краткое описание результата для LLM."""
         if run_result.succeeded:
             paths = self._collect_result_paths(run_result)
             if paths:
-                joined = "\n".join(f"• {path}" for path in paths)
-                return (
-                    f"Готово. Задача «{action_text}» выполнена.\n"
-                    f"Фактический путь на диске:\n{joined}"
-                )
-            return f"Готово. Задача «{action_text}» выполнена."
+                return f"Успешно выполнено. Пути: {', '.join(paths)}"
+            return "Успешно выполнено."
 
-        reason = run_result.final_analysis or run_result.final_error or "неизвестная ошибка"
-        paths = self._collect_result_paths(run_result)
-        if paths:
-            joined = "\n".join(f"• {path}" for path in paths)
-            return (
-                f"Не удалось выполнить «{action_text}»: {reason}\n"
-                f"Затронутые пути:\n{joined}"
-            )
-        return f"Не удалось выполнить «{action_text}»: {reason}"
+        reason = run_result.final_analysis or run_result.final_error or "ошибка"
+        return f"Ошибка: {reason}"
 
     def _collect_result_paths(self, run_result: TaskRunResult) -> list[str]:
+        """Собрать список путей из результата."""
         paths: list[str] = []
         for step in run_result.steps:
             if not step.result:
